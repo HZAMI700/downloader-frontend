@@ -51,7 +51,7 @@ export interface ExtractResponse {
   error?: string;
 }
 
-const DEFAULT_BACKEND_URL =
+export const DEFAULT_BACKEND_URL =
   'https://sm4hxox44t.preview.c35.airoapp.ai/?airoShareToken=ScCptdbH_MtB';
 
 export function getBackendUrl(): string {
@@ -79,58 +79,46 @@ export function setCustomBackendUrl(url: string | null): void {
 }
 
 /**
- * Builds a clean, fully-qualified URL for any backend API endpoint,
- * safely handling query tokens (such as GoDaddy Airo airoShareToken) and paths.
+ * Executes a request to the backend through the same-origin Next.js server proxy,
+ * eliminating browser CORS blocking and preserving GoDaddy Airo preview share tokens.
  */
-export function buildApiUrl(endpoint: string, queryParams: Record<string, string> = {}): string {
-  let rawBase = getBackendUrl();
+async function fetchThroughProxy(
+  subPath: string,
+  options: RequestInit = {},
+  queryParams: Record<string, string> = {}
+): Promise<Response> {
+  const customBackend = typeof window !== 'undefined' ? localStorage.getItem('custom_backend_url') : null;
 
-  // If user entered the airo.ai share wrapper link, translate directly to the preview container
-  if (
-    rawBase.includes('airo.ai/share/c200aHhveDQ0dDpjMzU6U2NDcHRkYkhfTXRC') ||
-    rawBase.includes('airo-builder.godaddy.com/share/c200aHhveDQ0dDpjMzU6U2NDcHRkYkhfTXRC')
-  ) {
-    rawBase = 'https://sm4hxox44t.preview.c35.airoapp.ai/?airoShareToken=ScCptdbH_MtB';
+  const searchParams = new URLSearchParams(queryParams);
+  const qs = searchParams.toString();
+  const endpoint = `/api/backend/${subPath}${qs ? `?${qs}` : ''}`;
+
+  const headers = new Headers(options.headers || {});
+  if (customBackend) {
+    headers.set('x-custom-backend', customBackend);
   }
 
-  let parsed: URL;
-  try {
-    parsed = new URL(rawBase);
-  } catch {
-    parsed = new URL(DEFAULT_BACKEND_URL);
-  }
-
-  const basePath = parsed.pathname.replace(/\/+$/, '');
-  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-
-  // Preserve base query params (e.g. airoShareToken) and merge with endpoint query params
-  const searchParams = new URLSearchParams(parsed.search);
-  for (const [key, value] of Object.entries(queryParams)) {
-    if (value !== undefined && value !== null) {
-      searchParams.set(key, value);
-    }
-  }
-
-  const queryStr = searchParams.toString();
-  return `${parsed.origin}${basePath}${cleanEndpoint}${queryStr ? `?${queryStr}` : ''}`;
+  return fetch(endpoint, {
+    ...options,
+    headers,
+  });
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {
-  const url = buildApiUrl('/api/health');
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 10000);
+  const id = setTimeout(() => controller.abort(), 12000);
 
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-      },
-      signal: controller.signal,
-    });
+    const res = await fetchThroughProxy(
+      'health',
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      }
+    );
     clearTimeout(id);
 
-    // Accept 200 (ok) or 503 (degraded/starting)
     if (!res.ok && res.status !== 503) {
       throw new Error(`Health check returned status ${res.status}`);
     }
@@ -138,27 +126,29 @@ export async function fetchHealth(): Promise<HealthResponse> {
   } catch (err: unknown) {
     clearTimeout(id);
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('Backend connection timed out (10s). Check if backend server is awake.');
+      throw new Error('Backend connection timed out (12s). Check if backend server is active.');
     }
     throw err;
   }
 }
 
 export async function extractMedia(videoUrl: string): Promise<VideoMetadata> {
-  const url = buildApiUrl('/api/info');
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 45000);
+  const id = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify({ url: videoUrl }),
-      signal: controller.signal,
-    });
+    const res = await fetchThroughProxy(
+      'info',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ url: videoUrl }),
+        signal: controller.signal,
+      }
+    );
     clearTimeout(id);
 
     const json = (await res.json()) as ExtractResponse;
@@ -176,12 +166,12 @@ export async function extractMedia(videoUrl: string): Promise<VideoMetadata> {
 }
 
 export function buildDownloadUrl(videoUrl: string, formatId: string, title?: string): string {
-  const params: Record<string, string> = {
+  const params = new URLSearchParams({
     url: videoUrl,
     format: formatId,
-  };
+  });
   if (title) {
-    params.title = title;
+    params.set('title', title);
   }
-  return buildApiUrl('/api/download', params);
+  return `/api/backend/download?${params.toString()}`;
 }
