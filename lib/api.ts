@@ -51,18 +51,21 @@ export interface ExtractResponse {
   error?: string;
 }
 
+const DEFAULT_BACKEND_URL =
+  'https://sm4hxox44t.preview.c35.airoapp.ai/?airoShareToken=ScCptdbH_MtB';
+
 export function getBackendUrl(): string {
   if (typeof window !== 'undefined') {
     const custom = localStorage.getItem('custom_backend_url');
     if (custom && custom.trim()) {
-      return custom.trim().replace(/\/+$/, '');
+      return custom.trim();
     }
   }
   const envUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
   if (envUrl && envUrl.trim()) {
-    return envUrl.trim().replace(/\/+$/, '');
+    return envUrl.trim();
   }
-  return 'http://localhost:5000';
+  return DEFAULT_BACKEND_URL;
 }
 
 export function setCustomBackendUrl(url: string | null): void {
@@ -75,42 +78,85 @@ export function setCustomBackendUrl(url: string | null): void {
   }
 }
 
+/**
+ * Builds a clean, fully-qualified URL for any backend API endpoint,
+ * safely handling query tokens (such as GoDaddy Airo airoShareToken) and paths.
+ */
+export function buildApiUrl(endpoint: string, queryParams: Record<string, string> = {}): string {
+  let rawBase = getBackendUrl();
+
+  // If user entered the airo.ai share wrapper link, translate directly to the preview container
+  if (
+    rawBase.includes('airo.ai/share/c200aHhveDQ0dDpjMzU6U2NDcHRkYkhfTXRC') ||
+    rawBase.includes('airo-builder.godaddy.com/share/c200aHhveDQ0dDpjMzU6U2NDcHRkYkhfTXRC')
+  ) {
+    rawBase = 'https://sm4hxox44t.preview.c35.airoapp.ai/?airoShareToken=ScCptdbH_MtB';
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawBase);
+  } catch {
+    parsed = new URL(DEFAULT_BACKEND_URL);
+  }
+
+  const basePath = parsed.pathname.replace(/\/+$/, '');
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+
+  // Preserve base query params (e.g. airoShareToken) and merge with endpoint query params
+  const searchParams = new URLSearchParams(parsed.search);
+  for (const [key, value] of Object.entries(queryParams)) {
+    if (value !== undefined && value !== null) {
+      searchParams.set(key, value);
+    }
+  }
+
+  const queryStr = searchParams.toString();
+  return `${parsed.origin}${basePath}${cleanEndpoint}${queryStr ? `?${queryStr}` : ''}`;
+}
+
 export async function fetchHealth(): Promise<HealthResponse> {
-  const base = getBackendUrl();
+  const url = buildApiUrl('/api/health');
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 6000);
+  const id = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const res = await fetch(`${base}/api/health`, {
+    const res = await fetch(url, {
       method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Accept': 'application/json',
+      },
       signal: controller.signal,
     });
     clearTimeout(id);
 
-    if (!res.ok) {
+    // Accept 200 (ok) or 503 (degraded/starting)
+    if (!res.ok && res.status !== 503) {
       throw new Error(`Health check returned status ${res.status}`);
     }
     return await res.json();
   } catch (err: unknown) {
     clearTimeout(id);
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('Backend connection timed out (6s). Check if backend server is running.');
+      throw new Error('Backend connection timed out (10s). Check if backend server is awake.');
     }
     throw err;
   }
 }
 
-export async function extractMedia(url: string): Promise<VideoMetadata> {
-  const base = getBackendUrl();
+export async function extractMedia(videoUrl: string): Promise<VideoMetadata> {
+  const url = buildApiUrl('/api/info');
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), 45000); // 45s max
+  const id = setTimeout(() => controller.abort(), 45000);
 
   try {
-    const res = await fetch(`${base}/api/info`, {
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({ url: videoUrl }),
       signal: controller.signal,
     });
     clearTimeout(id);
@@ -129,14 +175,13 @@ export async function extractMedia(url: string): Promise<VideoMetadata> {
   }
 }
 
-export function buildDownloadUrl(url: string, formatId: string, title?: string): string {
-  const base = getBackendUrl();
-  const params = new URLSearchParams({
-    url,
+export function buildDownloadUrl(videoUrl: string, formatId: string, title?: string): string {
+  const params: Record<string, string> = {
+    url: videoUrl,
     format: formatId,
-  });
+  };
   if (title) {
-    params.set('title', title);
+    params.title = title;
   }
-  return `${base}/api/download?${params.toString()}`;
+  return buildApiUrl('/api/download', params);
 }
